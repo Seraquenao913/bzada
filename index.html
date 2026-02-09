@@ -793,8 +793,31 @@ function buildKinOrClause(tokens){
         try{
           const s = (searchEl.value || '').trim();
           const onlyValid = (validFilterEl.value === 'yes');
-          const { data: sumData, error: sumErr } = await supabase.rpc('sum_wcoin_filtered', { _search: s || null, _only_valid: onlyValid });
-          cardWSum.textContent = sumErr ? '–' : fmt(sumData || 0);
+
+          // Prefer RPC (rápido). Se não existir, faz fallback local.
+          try{
+            const { data: sumData, error: sumErr } = await supabase.rpc('sum_wcoin_filtered', { _search: s || null, _only_valid: onlyValid });
+            if(!sumErr){
+              cardWSum.textContent = fmt(sumData || 0);
+            }else{
+              throw sumErr;
+            }
+          }catch(_rpcErr){
+            // Fallback: soma wcoin_int direto da tabela (limitado p/ performance)
+            let q = supabase.from(TABLE).select('wcoin_int,f1,f2,f3').limit(5000);
+            if(onlyValid) q = q.eq('f3','valid');
+            if(s){
+              // PostgREST OR filter
+              q = q.or(`f1.ilike.%${s}%,f2.ilike.%${s}%`);
+            }
+            const { data: rows, error: e2 } = await q;
+            if(e2){
+              cardWSum.textContent = '–';
+            }else{
+              const total = (rows||[]).reduce((a,r)=> a + Number(r.wcoin_int||0), 0);
+              cardWSum.textContent = fmt(total);
+            }
+          }
         }catch(_e){
           cardWSum.textContent = '–';
         }
@@ -867,21 +890,48 @@ function buildKinOrClause(tokens){
     async function loadUserEditsPie(){
       if(!userPieCanvas) return;
       try{
+        // Prefer RPC
         const { data, error } = await supabase.rpc('get_update_stats');
-        if(error){ console.warn('get_update_stats:', error.message); return; }
+        if(!error){
+          const arr = Array.isArray(data) ? data : [];
+          lastUserRows = arr.map(r => ({
+            label: (r.user_email || (r.user_id ?? 'sem email')),
+            value: Number(r.total_edits || r.total || 0)
+          }));
+          renderUserChartFromRows(lastUserRows);
+          return;
+        }
 
-        const arr = Array.isArray(data) ? data : [];
-        lastUserRows = arr.map(r => ({
-          label: (r.user_email || (r.user_id ?? 'sem email')),
-          value: Number(r.total_edits || r.total || 0)
-        }));
+        console.warn('get_update_stats RPC failed, using fallback:', error.message);
+
+        // Fallback: lê últimos logs e agrega no JS
+        const { data: logs, error: e2 } = await supabase
+          .from('webzen_edit_log')
+          .select('user_email,user_id,action')
+          .eq('action','UPDATE')
+          .order('created_at', { ascending: false })
+          .limit(5000);
+
+        if(e2){
+          console.warn('fallback webzen_edit_log error:', e2.message);
+          return;
+        }
+
+        const map = new Map();
+        (logs||[]).forEach(r=>{
+          const key = (r.user_email || r.user_id || 'sem email');
+          map.set(key, (map.get(key)||0) + 1);
+        });
+
+        lastUserRows = Array.from(map.entries()).map(([label,value])=>({label, value}));
         renderUserChartFromRows(lastUserRows);
+
       }catch(err){
         console.warn('loadUserEditsPie error:', err);
       }
     }
 
-    function optimisticUserEditsBump(){
+function optimisticUserEditsBump(){
       if(!currentUserEmail) return;
       const rowsArr = Array.isArray(lastUserRows) ? lastUserRows.slice() : [];
       const idx = rowsArr.findIndex(r => r.label === currentUserEmail);
@@ -975,18 +1025,55 @@ function buildKinOrClause(tokens){
     async function loadStatusPie(){
       if(!statusCanvas) return;
       try{
+        // Prefer RPC
         const { data, error } = await supabase.rpc('get_status_distribution');
-        if(error){ console.warn('get_status_distribution:', error.message); return; }
-        if(!data || !data[0]) return;
+        if(!error && data && data[0]){
+          const d = data[0];
+          lastStatusReal = {
+            online: Number(d.online || 0),
+            itens: Number(d.itens_pegar || 0),
+            rapelado: Number(d.rapelado || 0),
+            validas: Number(d.validas_limpas || 0),
+          };
+          renderStatusChart(lastStatusReal);
+          return;
+        }
 
-        const d = data[0];
-        lastStatusReal = {
-          online: Number(d.online || 0),
-          itens: Number(d.itens_pegar || 0),
-          rapelado: Number(d.rapelado || 0),
-          validas: Number(d.validas_limpas || 0),
-        };
+        if(error){
+          console.warn('get_status_distribution RPC failed, using fallback:', error.message);
+        }
+
+        // Fallback: calcula em JS a partir de webzen_cache_raw (somente valid)
+        const { data: rows, error: e2 } = await supabase
+          .from(TABLE)
+          .select('online,flag,olhar,s1,s2,s3,s4,s5,s6,s7,tag4,f3')
+          .eq('f3','valid')
+          .limit(10000);
+
+        if(e2){
+          console.warn('fallback status query error:', e2.message);
+          return;
+        }
+
+        let online=0, itens=0, rapelado=0, validas=0;
+        (rows||[]).forEach(r=>{
+          const isOnline = !!r.online;
+          const isFlag = !!r.flag;
+          const isOlhar = !!r.olhar;
+          const sAny = !!(r.s1||r.s2||r.s3||r.s4||r.s5||r.s6||r.s7);
+          const tag = (r.tag4||'').trim();
+
+          if(isOnline) online += 1;
+          if(isFlag) itens += 1;
+          if(isOlhar) rapelado += 1;
+
+          const clean = (!isOnline && !isFlag && !isOlhar && !sAny && tag === '');
+          if(clean) validas += 1;
+        });
+
+        lastStatusReal = { online, itens, rapelado, validas };
         renderStatusChart(lastStatusReal);
+
       }catch(err){
         console.warn('loadStatusPie error:', err);
       }
