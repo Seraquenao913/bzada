@@ -308,7 +308,12 @@
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storage: window.localStorage }
     });
 
-    // ========= ELEMENTOS =========
+    
+    // Expor para o Console (F12) e debug
+    window.supabase = supabase;
+    window.MU_TABLE = TABLE;
+    window.deleteWebzenById = async (id) => supabase.from(TABLE).delete().eq('id', id);
+// ========= ELEMENTOS =========
     const authCard = document.getElementById('authCard');
     const dashboard = document.getElementById('dashboard');
     const loginBtn = document.getElementById('loginBtn');
